@@ -1,70 +1,89 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from config import FIELD_MAPPING
+import logging
 
-class DataValidator:
-    def __init__(self, data):
-        self.data = data
-        self.result = {"pass": True, "errors": []}
+logger = logging.getLogger(__name__)
 
-    def _check_balance_sheet(self):
-        """修复：放宽勾稽校验阈值（允许1%误差）"""
-        bs = self.data.get("balance_sheet", {})
-        assets = bs.get("total_assets", 0)
-        liab_equity = bs.get("total_liabilities", 0) + bs.get("total_equity", 0)
-        
-        # 跳过资产为0的情况
-        if assets == 0 or liab_equity == 0:
-            return
-        
-        # 计算误差率（1%以内视为正常）
-        error_rate = abs(assets - liab_equity) / max(assets, liab_equity)
-        if error_rate > 0.01:
-            self.result["errors"].append(f"资产负债表勾稽错误: {assets} ≠ {liab_equity} (误差率{error_rate:.2%})")
-            self.result["pass"] = False
+class FinancialDataValidator:
+    def __init__(self):
+        self.errors = []  # 记录校验错误
 
-    def _check_cash_flow(self):
-        """校验现金流量表"""
-        cf = self.data.get("cash_flow", {})
-        net = cf.get("net_cash_flow", 0)
-        total = cf.get("operating_cash_flow", 0) + cf.get("investing_cash_flow", 0) + cf.get("financing_cash_flow", 0)
-        
-        if net == 0 or total == 0:
-            return
-        
-        error_rate = abs(net - total) / max(net, total)
-        if error_rate > 0.01:
-            self.result["errors"].append(f"现金流量表勾稽错误: {net} ≠ {total} (误差率{error_rate:.2%})")
-            self.result["pass"] = False
+    def validate_all(self, data):
+        """全量数据校验：完整性、合理性、逻辑一致性"""
+        self.errors.clear()
+        # 执行所有校验规则
+        checks = [
+            self._check_non_empty(data),
+            self._check_numeric_consistency(data),
+            self._check_balance_relation(data),
+            self._check_profit_relation(data)
+        ]
+        # 输出校验结果
+        if self.errors:
+            logger.error(f"数据校验失败，错误列表：{self.errors}")
+            return False
+        logger.info("数据校验通过")
+        return all(checks)
 
-    def _check_consistency(self):
-        """校验表间一致性"""
-        core = self.data.get("core_performance", {})
-        income = self.data.get("income_statement", {})
-        cf = self.data.get("cash_flow", {})
-        
-        # 净利润一致性
-        core_profit = core.get("net_profit", 0)
-        income_profit = income.get("net_profit_parent", 0)
-        if core_profit > 0 and income_profit > 0:
-            error_rate = abs(core_profit - income_profit) / max(core_profit, income_profit)
-            if error_rate > 0.05:  # 5%误差阈值
-                self.result["errors"].append("净利润表间不一致")
-                self.result["pass"] = False
-        
-        # 经营现金流一致性
-        core_cash = core.get("operating_cash_flow", 0)
-        cf_cash = cf.get("operating_cash_flow", 0)
-        if core_cash > 0 and cf_cash > 0:
-            error_rate = abs(core_cash - cf_cash) / max(core_cash, cf_cash)
-            if error_rate > 0.05:
-                self.result["errors"].append("经营现金流表间不一致")
-                self.result["pass"] = False
+    def _check_non_empty(self, data):
+        """检查核心字段非空（值>0）"""
+        core_fields_map = {
+            "core_performance": ["total_revenue", "net_profit"],
+            "balance_sheet": ["total_assets", "total_liabilities"],
+            "income_statement": ["operating_revenue", "operating_cost"],
+            "cash_flow": ["operating_cash_flow"]
+        }
+        for table, fields in core_fields_map.items():
+            for field in fields:
+                value = data[table].get(field, 0.0)
+                if value <= 0:
+                    self.errors.append(f"[{table}] {field} 为空或值≤0（当前值：{value}）")
+        return len(self.errors) == 0
 
-    def validate(self):
-        """执行全量校验"""
-        self._check_balance_sheet()
-        self._check_cash_flow()
-        self._check_consistency()
-        return self.result
+    def _check_numeric_consistency(self, data):
+        """检查数值合理性（非负、格式正确）"""
+        # 总资产、总负债、货币资金等不能为负
+        non_negative_fields = [
+            ("balance_sheet", "total_assets"),
+            ("balance_sheet", "total_liabilities"),
+            ("balance_sheet", "monetary_funds"),
+            ("balance_sheet", "accounts_receivable"),
+            ("balance_sheet", "inventory")
+        ]
+        for table, field in non_negative_fields:
+            value = data[table].get(field, 0.0)
+            if value < 0:
+                self.errors.append(f"[{table}] {field} 为负数（当前值：{value}）")
+        return len(self.errors) == 0
+
+    def _check_balance_relation(self, data):
+        """检查资产负债表逻辑：资产总计 ≈ 负债总计 + 所有者权益合计（允许±1%误差）"""
+        balance = data["balance_sheet"]
+        total_assets = balance.get("total_assets", 0.0)
+        total_liab = balance.get("total_liabilities", 0.0)
+        total_equity = balance.get("total_equity", 0.0)
+        sum_liab_equity = total_liab + total_equity
+
+        if total_assets == 0 or sum_liab_equity == 0:
+            return True  # 无数据时跳过
+        
+        # 计算误差率
+        error_rate = abs(total_assets - sum_liab_equity) / total_assets
+        if error_rate > 0.01:  # 误差超过1%
+            self.errors.append(
+                f"资产负债表逻辑错误：资产总计({total_assets}) ≠ 负债总计({total_liab}) + 所有者权益({total_equity})，误差率：{error_rate:.2%}"
+            )
+        return len(self.errors) == 0
+
+    def _check_profit_relation(self, data):
+        """检查利润表逻辑：营业利润 ≤ 利润总额"""
+        income = data["income_statement"]
+        operating_profit = income.get("operating_profit", 0.0)
+        total_profit = income.get("total_profit", 0.0)
+
+        if operating_profit == 0 or total_profit == 0:
+            return True
+        
+        if operating_profit > total_profit + 1e6:  # 允许100万以内误差（非经常性损益）
+            self.errors.append(
+                f"利润表逻辑错误：营业利润({operating_profit}) > 利润总额({total_profit})"
+            )
+        return len(self.errors) == 0
