@@ -1,254 +1,168 @@
-import os
+import pdfplumber
 import re
-import time
-from PyPDF2 import PdfReader
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from config import REPORT_PATHS, PDF_KEYWORDS
-from utils import extract_company_info, to_number
+import logging
+from typing import Dict, List
+import pandas as pd
 
-# OCR配置（保持不变）
-TESSERACT_PATH = r"D:\Program Files\Tesseract-OCR\tesseract.exe"
-POPPLER_PATH = r"D:\poppler-25.12.0-0\poppler-25.12.0\Library\bin"
+# 日志配置
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class PDFParser:
-    def __init__(self, pdf_path):
+# 预定义公司代码映射（解决华润三九代码缺失问题）
+COMPANY_CODE_MAP = {
+    "金花股份": "600080",
+    "华润三九": "000999"
+}
+
+# 财务指标关键词映射（覆盖赛题要求的核心字段）
+INDICATOR_MAP = {
+    "营业收入": "total_revenue",
+    "营业总收入": "total_revenue",
+    "净利润": "net_profit",
+    "归属于母公司股东的净利润": "net_profit",
+    "扣除非经常性损益的净利润": "net_profit_deduct",
+    "基本每股收益": "eps",
+    "资产总计": "total_assets",
+    "负债总计": "total_liabilities",
+    "经营活动产生的现金流量净额": "operating_cash_flow",
+    "营业利润": "operating_profit",
+    "利润总额": "total_profit"
+}
+
+class FinancialReportParser:
+    """适配赛题的财报解析器（提取表格数据）"""
+    def __init__(self, pdf_path: str):
         self.pdf_path = pdf_path
-        self.company_info = extract_company_info(pdf_path)
-        # 修复：从文件名提取年份时，兼容2022年报告（原文件是2022年报，2023年披露）
-        if self.company_info["report_year"] == 2023 and "2022" in self.pdf_path:
-            self.company_info["report_year"] = 2022
-        self.text = self._read_pdf()
+        self.pdf = pdfplumber.open(pdf_path)
+        self.company_info = self._parse_company_info()
+        self.report_data = {}
 
-    def _read_pdf(self):
-        """保持原有逻辑不变"""
+    def _parse_company_info(self) -> Dict[str, str]:
+        """解析公司信息（名称+代码+年份）"""
+        info = {"company_code": "", "company_name": "", "report_year": ""}
+        filename = self.pdf_path.split("\\")[-1]
+        
+        # 1. 匹配公司名称
+        for name in COMPANY_CODE_MAP.keys():
+            if name in filename:
+                info["company_name"] = name
+                info["company_code"] = COMPANY_CODE_MAP[name]
+                break
+        
+        # 2. 匹配年份（2022-2025）
+        year_match = re.search(r"(202[2-5])", filename)
+        if not year_match:
+            # 从PDF文本兜底匹配
+            first_page_text = self.pdf.pages[0].extract_text()
+            year_match = re.search(r"(202[2-5])年", first_page_text)
+        if year_match:
+            info["report_year"] = year_match.group(1)
+        
+        return info
+
+    def _clean_numeric(self, value: str) -> float:
+        """清洗数值（处理万/亿/逗号/空格）"""
+        if pd.isna(value) or value == "" or value == "-":
+            return 0.0
+        
+        # 去除非数字字符（保留小数点、万、亿）
+        clean_val = re.sub(r"[^\d\.万亿]", "", str(value).strip())
+        multiplier = 1.0
+        
+        # 处理单位
+        if "亿" in clean_val:
+            multiplier = 1e8
+            clean_val = clean_val.replace("亿", "")
+        elif "万" in clean_val:
+            multiplier = 1e4
+            clean_val = clean_val.replace("万", "")
+        
+        # 转换为数值
         try:
-            with open(self.pdf_path, "rb") as f:
-                reader = PdfReader(f)
-                text = ""
-                max_pages = min(50, len(reader.pages))
-                for page in reader.pages[:max_pages]:
-                    start = time.time()
-                    page_text = page.extract_text() or ""
-                    if time.time() - start > 5:
-                        break
-                    text += page_text + "\n"
-            
-            if text.strip() and len(text) > 100:
-                print(f"✅ 文本型PDF，常规提取成功：{os.path.basename(self.pdf_path)}")
-                return text
-            
-            print(f"⚠️  检测到图片型PDF，启用OCR识别：{os.path.basename(self.pdf_path)}")
-            return self._ocr_pdf()
-            
-        except Exception as e:
-            print(f"❌ 读取PDF失败：{e}")
-            return ""
+            return float(clean_val.replace(",", "")) * multiplier
+        except:
+            return 0.0
 
-    def _ocr_pdf(self):
-        """保持原有逻辑不变"""
-        try:
-            import pytesseract
-            from pdf2image import convert_from_path
-            from PIL import Image
+    def _extract_table_data(self) -> Dict[str, float]:
+        """提取所有表格中的财务指标"""
+        indicator_values = {}
+        
+        # 遍历前30页（财报核心数据在前30页）
+        for page_num in range(min(30, len(self.pdf.pages))):
+            page = self.pdf.pages[page_num]
+            tables = page.extract_tables()
             
-            pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
-            images = convert_from_path(
-                self.pdf_path,
-                poppler_path=POPPLER_PATH,
-                first_page=1,
-                last_page=10,
-                fmt="png",
-                thread_count=2
-            )
-            
-            ocr_text = ""
-            for idx, img in enumerate(images):
-                page_text = pytesseract.image_to_string(img, lang="chi_sim")
-                ocr_text += f"\n==== 第{idx+1}页 ====\n" + page_text
-            
-            print(f"📝 OCR识别结果（前500字符）：\n{ocr_text[:500]}")
-            return ocr_text
-            
-        except ImportError as e:
-            print(f"❌ OCR依赖缺失：{e}")
-            print("👉 请执行：pip install pytesseract pdf2image pillow")
-            return ""
-        except Exception as e:
-            print(f"❌ OCR识别失败：{e}")
-            return ""
+            for table in tables:
+                # 转换为DataFrame便于处理
+                df = pd.DataFrame(table)
+                # 遍历表格行，匹配指标
+                for _, row in df.iterrows():
+                    if len(row) < 2:
+                        continue
+                    # 第一列是指标名，第二列是数值
+                    indicator_name = str(row[0]).strip()
+                    indicator_value = str(row[1]).strip()
+                    
+                    # 匹配目标指标
+                    for key, field in INDICATOR_MAP.items():
+                        if key in indicator_name and field not in indicator_values:
+                            clean_val = self._clean_numeric(indicator_value)
+                            indicator_values[field] = clean_val
+                            logger.info(f"解析到[{self.company_info['company_name']}] {key} = {clean_val}")
+        
+        return indicator_values
 
-    def _extract_section(self, keywords):
-        """保持原有逻辑不变"""
-        for kw in keywords:
-            pattern = re.compile(
-                f"{kw}[\\s\\S]{1,10000}?(?=\\n\\s*?[一二三四五六七八九十]{1,2}、|$|\\Z)",
-                re.IGNORECASE | re.DOTALL
-            )
-            match = pattern.search(self.text)
-            if match:
-                return match.group()
-        return ""
-
-    def extract_core_performance(self):
-        """修复：精准匹配PDF表格中的核心业绩指标"""
-        section = self._extract_section(PDF_KEYWORDS["core_performance"])
-        data = self.company_info.copy()
-        # 适配PDF中的表格格式（如“营业收入 579,374,501.21”“归属于上市公司股东的净利润 33,459,505.16”）
-        rules = {
-            "total_revenue": [
-                r"营业收入\s+([\d,\.]+)",  # 匹配“营业收入 579,374,501.21”
-                r"营业总收入\s+([\d,\.]+)",
-                r"营业收入[:：]\s*([\d,\.]+)"
-            ],
-            "net_profit": [
-                r"归属于上市公司股东的净利润\s+([\d,\.]+)",  # 匹配PDF中的核心指标
-                r"净利润\s+([\d,\.]+)",
-                r"归属于母公司股东的净利润\s+([\d,\.]+)"
-            ],
-            "net_profit_deduct": [
-                r"归属于上市公司股东的扣除非经常性损益的净利润\s+([\d,\.]+)",
-                r"扣非净利润\s+([\d,\.]+)"
-            ],
-            "eps": [
-                r"基本每股收益\s+([\d,\.]+)",  # 匹配“基本每股收益 0.0896”
-                r"每股收益\s+([\d,\.]+)"
-            ],
-            "operating_cash_flow": [
-                r"经营活动产生的现金流量净额\s+([\d,\.]+)",  # 匹配“经营活动产生的现金流量净额 52,578,993.55”
-                r"经营现金流净额\s+([\d,\.]+)"
-            ]
+    def parse_all_reports(self) -> Dict[str, Dict]:
+        """解析四大报表（适配赛题字段要求）"""
+        table_data = self._extract_table_data()
+        
+        # 核心业绩表
+        self.report_data["core_performance"] = {
+            **self.company_info,
+            "total_revenue": table_data.get("total_revenue", 0.0),
+            "net_profit": table_data.get("net_profit", 0.0),
+            "net_profit_deduct": table_data.get("net_profit_deduct", 0.0),
+            "eps": table_data.get("eps", 0.0),
+            "operating_cash_flow": table_data.get("operating_cash_flow", 0.0)
         }
-
-        for k, patterns in rules.items():
-            value = 0.0
-            for pat in patterns:
-                m = re.search(pat, section)
-                if m:
-                    value = to_number(m.group(1))
-                    break
-            data[k] = value
-        return data
-
-    def extract_balance_sheet(self):
-        """修复：精准匹配资产负债表表格数据"""
-        section = self._extract_section(PDF_KEYWORDS["balance_sheet"])
-        data = self.company_info.copy()
-        # 适配PDF中的“总资产 1,974,418,631.97”格式
-        rules = {
-            "total_assets": [
-                r"总资产\s+([\d,\.]+)",  # 匹配PDF中的总资产数据
-                r"资产总计\s+([\d,\.]+)",
-                r"资产总计[:：]\s*([\d,\.]+)"
-            ],
-            "total_liabilities": [
-                r"总负债\s+([\d,\.]+)",
-                r"负债总计\s+([\d,\.]+)",
-                r"负债总计[:：]\s*([\d,\.]+)"
-            ],
-            "total_equity": [
-                r"归属于上市公司股东的净资产\s+([\d,\.]+)",  # 匹配PDF中的净资产数据
-                r"所有者权益合计\s+([\d,\.]+)",
-                r"股东权益合计\s+([\d,\.]+)"
-            ],
-            "monetary_funds": [
-                r"货币资金\s+([\d,\.]+)",
-                r"货币资金[:：]\s*([\d,\.]+)"
-            ],
-            "accounts_receivable": [
-                r"应收账款\s+([\d,\.]+)",
-                r"应收账款[:：]\s*([\d,\.]+)"
-            ],
-            "inventory": [
-                r"存货\s+([\d,\.]+)",
-                r"存货[:：]\s*([\d,\.]+)"
-            ]
+        
+        # 资产负债表
+        self.report_data["balance_sheet"] = {
+            **self.company_info,
+            "total_assets": table_data.get("total_assets", 0.0),
+            "total_liabilities": table_data.get("total_liabilities", 0.0)
         }
-
-        for k, patterns in rules.items():
-            value = 0.0
-            for pat in patterns:
-                m = re.search(pat, section)
-                if m:
-                    value = to_number(m.group(1))
-                    break
-            data[k] = value
-        return data
-
-    def extract_income_statement(self):
-        """修复：精准匹配利润表表格数据"""
-        section = self._extract_section(PDF_KEYWORDS["income_statement"])
-        data = self.company_info.copy()
-        rules = {
-            "operating_revenue": [
-                r"营业收入\s+([\d,\.]+)",
-                r"营业总收入\s+([\d,\.]+)"
-            ],
-            "operating_cost": [
-                r"营业成本\s+([\d,\.]+)",  # 匹配PDF中的营业成本数据
-                r"营业成本[:：]\s*([\d,\.]+)"
-            ],
-            "operating_profit": [
-                r"营业利润\s+([\d,\.]+)",
-                r"营业利润[:：]\s*([\d,\.]+)"
-            ],
-            "total_profit": [
-                r"利润总额\s+([\d,\.]+)",
-                r"利润总额[:：]\s*([\d,\.]+)"
-            ],
-            "net_profit_parent": [
-                r"归属于上市公司股东的净利润\s+([\d,\.]+)",
-                r"归母净利润\s+([\d,\.]+)"
-            ]
+        
+        # 利润表
+        self.report_data["income_statement"] = {
+            **self.company_info,
+            "operating_profit": table_data.get("operating_profit", 0.0),
+            "total_profit": table_data.get("total_profit", 0.0),
+            "net_profit": table_data.get("net_profit", 0.0)
         }
-
-        for k, patterns in rules.items():
-            value = 0.0
-            for pat in patterns:
-                m = re.search(pat, section)
-                if m:
-                    value = to_number(m.group(1))
-                    break
-            data[k] = value
-        return data
-
-    def extract_cash_flow(self):
-        """修复：精准匹配现金流量表表格数据"""
-        section = self._extract_section(PDF_KEYWORDS["cash_flow"])
-        data = self.company_info.copy()
-        rules = {
-            "operating_cash_flow": [
-                r"经营活动产生的现金流量净额\s+([\d,\.]+)",
-                r"经营现金流\s+([\d,\.]+)"
-            ],
-            "investing_cash_flow": [
-                r"投资活动产生的现金流量净额\s+([\d,\.]+)",
-                r"投资现金流\s+([\d,\.]+)"
-            ],
-            "financing_cash_flow": [
-                r"筹资活动产生的现金流量净额\s+([\d,\.]+)",
-                r"筹资现金流\s+([\d,\.]+)"
-            ],
-            "net_cash_flow": [
-                r"现金及现金等价物净增加额\s+([\d,\.]+)",
-                r"现金净增加额\s+([\d,\.]+)"
-            ]
+        
+        # 现金流量表
+        self.report_data["cash_flow"] = {
+            **self.company_info,
+            "operating_cash_flow": table_data.get("operating_cash_flow", 0.0),
+            "invest_cash_flow": table_data.get("invest_cash_flow", 0.0),
+            "finance_cash_flow": table_data.get("finance_cash_flow", 0.0)
         }
+        
+        self.pdf.close()
+        return self.report_data
 
-        for k, patterns in rules.items():
-            value = 0.0
-            for pat in patterns:
-                m = re.search(pat, section)
-                if m:
-                    value = to_number(m.group(1))
-                    break
-            data[k] = value
-        return data
+def parse_pdf_report(pdf_path: str) -> Dict[str, Dict]:
+    """便捷调用函数"""
+    try:
+        parser = FinancialReportParser(pdf_path)
+        return parser.parse_all_reports()
+    except Exception as e:
+        logger.error(f"解析{pdf_path}失败：{e}")
+        return {}
 
-    def parse_all(self):
-        return {
-            "core_performance": self.extract_core_performance(),
-            "balance_sheet": self.extract_balance_sheet(),
-            "income_statement": self.extract_income_statement(),
-            "cash_flow": self.extract_cash_flow()
-        }
+if __name__ == "__main__":
+    # 测试单个PDF
+    test_pdf = "D:/Bigdata/dbplat/data/data/附件2：财务报告/reports-深交所/华润三九：2022年年度报告.pdf"
+    data = parse_pdf_report(test_pdf)
+    logger.info(f"测试解析结果：{data}")
