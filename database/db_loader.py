@@ -1,167 +1,217 @@
-import sqlite3
-import os
-import glob
+from __future__ import annotations
+
+import argparse
 import logging
-from datetime import datetime
-from typing import Dict  # 关键：补充导入 Dict
-from pdf_parser import parse_pdf_report
-from data_validator import validate_financial_data
+import sqlite3
+from pathlib import Path
+from typing import Dict, Iterable, List
 
-# 配置
-DB_PATH = "D:/Bigdata/dbplat/finance_database.db"
-PDF_ROOT_PATH = "D:/Bigdata/dbplat/data/data/附件2：财务报告"
-SCHEMA_PATH = "D:/Bigdata/dbplat/database/schema.sql"
+try:
+    from .config import DB_PATH, REPORT_PATHS, SCHEMA_PATH, load_table_columns
+    from .data_validator import validate_financial_data
+    from .pdf_parser import parse_pdf_report
+    from .utils import get_all_pdf_files
+except ImportError:  # pragma: no cover
+    from database.config import DB_PATH, REPORT_PATHS, SCHEMA_PATH, load_table_columns
+    from database.data_validator import validate_financial_data
+    from database.pdf_parser import parse_pdf_report
+    from database.utils import get_all_pdf_files
 
-# 日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
 class FinancialDBLoader:
-    """财务数据入库加载器"""
-
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.conn = None
-        self._init_database()
-
-    def _init_database(self):
-        """初始化数据库（创建表）"""
-        # 删除旧数据库（可选）
-        if os.path.exists(self.db_path):
-            os.remove(self.db_path)
-            logger.info(f"已删除旧数据库：{self.db_path}")
-
-        # 连接数据库并执行schema
+    def __init__(self, db_path: str | Path = DB_PATH, reset_database: bool = True):
+        self.db_path = Path(db_path)
+        self.table_columns = load_table_columns()
         self.conn = sqlite3.connect(self.db_path)
-        self.conn.execute("PRAGMA foreign_keys = ON")  # 开启外键约束
-        try:
-            with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
-                schema_sql = f.read()
-            self.conn.executescript(schema_sql)
-            self.conn.commit()
-            logger.info("✅ 数据库表创建/检查完成")
-        except Exception as e:
-            logger.error(f"数据库初始化失败：{str(e)}")
-            raise
+        self.conn.row_factory = sqlite3.Row
+        self._init_database(reset_database=reset_database)
 
-    def _insert_report_data(self, report_type: str, data: Dict):
-        """插入单张报表数据"""
-        # 定义各表的插入SQL
-        insert_sqls = {
-            "core_performance": """
-                INSERT INTO core_performance 
-                (company_code, company_name, report_year, total_revenue, net_profit, 
-                 net_profit_deduct, eps, operating_cash_flow)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            "balance_sheet": """
-                INSERT INTO balance_sheet 
-                (company_code, company_name, report_year, total_assets, total_liabilities)
-                VALUES (?, ?, ?, ?, ?)
-            """,
-            "income_statement": """
-                INSERT INTO income_statement 
-                (company_code, company_name, report_year, operating_profit, total_profit, net_profit)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            "cash_flow": """
-                INSERT INTO cash_flow 
-                (company_code, company_name, report_year, operating_cash_flow, invest_cash_flow, finance_cash_flow)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """
-        }
+    def _init_database(self, reset_database: bool = True) -> None:
+        if reset_database and self.db_path.exists():
+            self.conn.close()
+            self.db_path.unlink()
+            self.conn = sqlite3.connect(self.db_path)
+            self.conn.row_factory = sqlite3.Row
 
-        sql = insert_sqls.get(report_type)
-        if not sql:
-            logger.warning(f"未知报表类型：{report_type}")
-            return
-
-        # 提取参数
-        params = []
-        if report_type == "core_performance":
-            params = [
-                data.get("company_code"), data.get("company_name"), data.get("report_year"),
-                data.get("total_revenue"), data.get("net_profit"),
-                data.get("net_profit_deduct"), data.get("eps"), data.get("operating_cash_flow")
-            ]
-        elif report_type == "balance_sheet":
-            params = [
-                data.get("company_code"), data.get("company_name"), data.get("report_year"),
-                data.get("total_assets"), data.get("total_liabilities")
-            ]
-        elif report_type == "income_statement":
-            params = [
-                data.get("company_code"), data.get("company_name"), data.get("report_year"),
-                data.get("operating_profit"), data.get("total_profit"), data.get("net_profit")
-            ]
-        elif report_type == "cash_flow":
-            params = [
-                data.get("company_code"), data.get("company_name"), data.get("report_year"),
-                data.get("operating_cash_flow"), data.get("invest_cash_flow"), data.get("finance_cash_flow")
-            ]
-
-        # 执行插入
-        try:
-            self.conn.execute(sql, params)
-            logger.debug(f"[{report_type}] 数据插入成功")
-        except Exception as e:
-            logger.error(f"[{report_type}] 数据插入失败：{str(e)}")
-            raise
-
-    # 找到process_pdf_file函数，修改以下部分：
-def process_pdf_file(self, pdf_path: str) -> bool:
-    try:
-        logger.info(f"正在解析：{os.path.basename(pdf_path)}")
-        # 1. 解析PDF
-        report_data = parse_pdf_report(pdf_path)
-        if not report_data:
-            logger.error(f"PDF解析无数据：{pdf_path}")
-            return False
-
-        # 2. 数据校验（仅警告，不阻断）
-        is_valid, errors = validate_financial_data(report_data)
-        
-        # 3. 核心逻辑：只要有有效数值就入库（即使有警告）
-        has_valid_data = False
-        for table_data in report_data.values():
-            # 检查是否有非0的核心数值
-            core_fields = ["total_revenue", "total_assets", "net_profit"]
-            if any(table_data.get(field, 0.0) > 0 for field in core_fields):
-                has_valid_data = True
-                break
-        
-        if not has_valid_data:
-            logger.warning(f"{pdf_path} 无有效财务数据，跳过入库")
-            return False
-        
-        # 4. 插入数据库
-        for report_type, data in report_data.items():
-            self._insert_report_data(report_type, data)
-
+        schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
+        self.conn.executescript(schema_sql)
         self.conn.commit()
-        logger.info(f"✅ 处理完成：{pdf_path} | 校验警告：{errors}")
-        return True
-    except Exception as e:
-        self.conn.rollback()
-        logger.error(f"处理PDF失败：{pdf_path} | 错误：{e}")
-        return False
+        logger.info("数据库初始化完成: %s", self.db_path)
 
-    
-def main():
-    """主流程"""
+    def _financial_fields(self, table_name: str) -> List[str]:
+        return [field for field in self.table_columns[table_name] if field not in {"serial_number", "stock_code", "stock_abbr", "report_period", "report_year"}]
+
+    def _has_payload(self, table_name: str, row: Dict[str, object]) -> bool:
+        return any(row.get(field_name) is not None for field_name in self._financial_fields(table_name))
+
+    def _build_upsert_sql(self, table_name: str) -> str:
+        columns = [field for field in self.table_columns[table_name] if field != "serial_number"]
+        placeholders = ", ".join("?" for _ in columns)
+        update_columns = [field for field in columns if field not in {"stock_code", "stock_abbr", "report_period", "report_year"}]
+        update_clause = ", ".join(
+            f"{field}=COALESCE(excluded.{field}, {table_name}.{field})" for field in update_columns
+        )
+        return f"""
+            INSERT INTO {table_name} ({", ".join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT(stock_code, report_year, report_period)
+            DO UPDATE SET
+                stock_abbr=excluded.stock_abbr,
+                {update_clause}
+        """
+
+    def _insert_report_data(self, table_name: str, row: Dict[str, object]) -> None:
+        columns = [field for field in self.table_columns[table_name] if field != "serial_number"]
+        sql = self._build_upsert_sql(table_name)
+        params = [row.get(column) for column in columns]
+        self.conn.execute(sql, params)
+
+    def process_pdf_file(self, pdf_path: str | Path) -> bool:
+        pdf_path = Path(pdf_path)
+        logger.info("开始处理: %s", pdf_path.name)
+
+        try:
+            reports = parse_pdf_report(pdf_path)
+            is_valid, issues = validate_financial_data(reports)
+            for table_name, messages in issues.items():
+                for message in messages:
+                    logger.warning("[%s] %s | %s", table_name, pdf_path.name, message)
+
+            inserted_tables = 0
+            for table_name, row in reports.items():
+                if not self._has_payload(table_name, row):
+                    continue
+                self._insert_report_data(table_name, row)
+                inserted_tables += 1
+
+            if inserted_tables == 0:
+                logger.warning("未写入任何数据: %s", pdf_path.name)
+                return False
+
+            self.conn.commit()
+            logger.info("处理完成: %s | 写入表数=%s | 校验通过=%s", pdf_path.name, inserted_tables, is_valid)
+            return True
+        except Exception:
+            self.conn.rollback()
+            logger.exception("处理失败: %s", pdf_path)
+            return False
+
+    def batch_process_pdfs(self, report_paths: Iterable[Path] = REPORT_PATHS) -> Dict[str, int]:
+        pdf_files = get_all_pdf_files(report_paths)
+        stats = {"total": len(pdf_files), "success": 0, "failed": 0}
+
+        for pdf_file in pdf_files:
+            if self.process_pdf_file(pdf_file):
+                stats["success"] += 1
+            else:
+                stats["failed"] += 1
+
+        self.update_quarter_over_quarter_growth()
+        self.conn.commit()
+        logger.info("批量处理结束: %s", stats)
+        return stats
+
+    def update_quarter_over_quarter_growth(self) -> None:
+        cursor = self.conn.execute(
+            """
+            SELECT serial_number, stock_code, report_year, report_period,
+                   total_operating_revenue, net_profit_10k_yuan
+            FROM core_performance
+            ORDER BY stock_code, report_year, CASE report_period
+                WHEN 'Q1' THEN 1
+                WHEN 'HY' THEN 2
+                WHEN 'Q3' THEN 3
+                WHEN 'FY' THEN 4
+                ELSE 5
+            END
+            """
+        )
+
+        grouped: Dict[tuple[str, int], Dict[str, sqlite3.Row]] = {}
+        for row in cursor.fetchall():
+            grouped.setdefault((row["stock_code"], row["report_year"]), {})[row["report_period"]] = row
+
+        order = ["Q1", "HY", "Q3", "FY"]
+        for rows_by_period in grouped.values():
+            revenue_quarter_values: Dict[str, float] = {}
+            profit_quarter_values: Dict[str, float] = {}
+            revenue_previous_cumulative = None
+            profit_previous_cumulative = None
+
+            for period in order:
+                row = rows_by_period.get(period)
+                if row is None:
+                    continue
+
+                revenue_cumulative = row["total_operating_revenue"]
+                profit_cumulative = row["net_profit_10k_yuan"]
+
+                if revenue_cumulative is not None:
+                    if period == "Q1" or revenue_previous_cumulative is None:
+                        revenue_quarter_values[period] = revenue_cumulative
+                    else:
+                        revenue_quarter_values[period] = revenue_cumulative - revenue_previous_cumulative
+                    revenue_previous_cumulative = revenue_cumulative
+
+                if profit_cumulative is not None:
+                    if period == "Q1" or profit_previous_cumulative is None:
+                        profit_quarter_values[period] = profit_cumulative
+                    else:
+                        profit_quarter_values[period] = profit_cumulative - profit_previous_cumulative
+                    profit_previous_cumulative = profit_cumulative
+
+            for index, period in enumerate(order):
+                row = rows_by_period.get(period)
+                if row is None or index == 0:
+                    continue
+                previous_period = order[index - 1]
+                revenue_qoq = self._safe_growth(
+                    revenue_quarter_values.get(period),
+                    revenue_quarter_values.get(previous_period),
+                )
+                profit_qoq = self._safe_growth(
+                    profit_quarter_values.get(period),
+                    profit_quarter_values.get(previous_period),
+                )
+
+                self.conn.execute(
+                    """
+                    UPDATE core_performance
+                    SET operating_revenue_qoq_growth = ?,
+                        net_profit_qoq_growth = ?
+                    WHERE serial_number = ?
+                    """,
+                    (revenue_qoq, profit_qoq, row["serial_number"]),
+                )
+
+    @staticmethod
+    def _safe_growth(current: float | None, previous: float | None) -> float | None:
+        if current is None or previous is None or abs(previous) < 1e-9 or current * previous < 0:
+            return None
+        return round((current - previous) / abs(previous) * 100, 4)
+
+    def close(self) -> None:
+        if self.conn:
+            self.conn.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Parse financial report PDFs into SQLite.")
+    parser.add_argument("--db-path", default=str(DB_PATH))
+    parser.add_argument("--keep-database", action="store_true", help="Append into existing database instead of recreating it.")
+    args = parser.parse_args()
+
+    loader = FinancialDBLoader(db_path=args.db_path, reset_database=not args.keep_database)
     try:
-        # 初始化加载器
-        loader = FinancialDBLoader(DB_PATH)
-        # 批量处理PDF
-        loader.batch_process_pdfs(PDF_ROOT_PATH)
-    except Exception as e:
-        logger.error(f"程序执行失败：{str(e)}")
-        raise
+        stats = loader.batch_process_pdfs()
+        print(stats)
     finally:
         loader.close()
+
 
 if __name__ == "__main__":
     main()

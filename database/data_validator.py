@@ -1,78 +1,106 @@
-from typing import Dict, List, Tuple  # 关键：补充导入 Tuple
+from __future__ import annotations
+
 import logging
+from typing import Dict, List, Tuple
+
+try:
+    from .config import COMMON_COLUMNS, load_table_columns
+except ImportError:  # pragma: no cover
+    from database.config import COMMON_COLUMNS, load_table_columns
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+TABLE_REQUIRED_FIELDS = {
+    "core_performance": ["total_operating_revenue", "net_profit_10k_yuan", "eps"],
+    "balance_sheet": ["asset_total_assets", "liability_total_liabilities", "equity_total_equity"],
+    "cash_flow": ["net_cash_flow", "operating_cf_net_amount"],
+    "income_statement": ["total_operating_revenue", "net_profit", "total_profit"],
+}
+
+
 class FinancialDataValidator:
-    """财务数据校验器"""
+    def __init__(self) -> None:
+        self.table_columns = load_table_columns()
 
-    # 核心指标阈值（避免0值/异常值入库）
-    VALIDATION_RULES = {
-        "total_revenue": {"min": 0.0, "required": True},
-        "net_profit": {"min": 0.0, "required": False},
-        "total_assets": {"min": 1000000.0, "required": True},  # 总资产至少100万
-        "total_liabilities": {"min": 0.0, "required": True}
-    }
-
-    @staticmethod
-    def _validate_indicator(value: float, rules: Dict) -> bool:
-        """校验单个指标"""
-        if rules.get("required") and value <= rules.get("min", 0.0):
-            return False
-        return True
-
-    def validate_report(self, report_type: str, data: Dict) -> Tuple[bool, List[str]]:
-        """校验单张报表数据"""
+    def _validate_common_fields(self, table_name: str, data: Dict[str, object]) -> List[str]:
         errors = []
-        # 必选基础信息校验
-        basic_fields = ["company_code", "company_name", "report_year"]
-        for field in basic_fields:
-            if not data.get(field):
-                errors.append(f"缺失基础信息：{field}")
+        for field_name in COMMON_COLUMNS:
+            if data.get(field_name) in {None, ""}:
+                errors.append(f"ERROR: {table_name} 缺少基础字段 {field_name}")
+        return errors
 
-        # 财务指标校验
-        for indicator, rules in self.VALIDATION_RULES.items():
-            if indicator in data:
-                value = data[indicator]
-                if not self._validate_indicator(value, rules):
-                    errors.append(f"{indicator} 数值异常：{value}（最小值要求：{rules['min']}）")
+    def _validate_payload(self, table_name: str, data: Dict[str, object]) -> List[str]:
+        warnings = []
+        metric_fields = [field for field in self.table_columns[table_name] if field not in COMMON_COLUMNS and field != "serial_number"]
+        populated_fields = [field for field in metric_fields if data.get(field) is not None]
+        if not populated_fields:
+            warnings.append(f"WARN: {table_name} 未提取到有效财务字段")
+        return warnings
 
-        # 校验结果
-        is_valid = len(errors) == 0
-        if not is_valid:
-            logger.warning(f"[{report_type}] 数据校验失败：{errors}")
-        return is_valid, errors
+    def _validate_required_metrics(self, table_name: str, data: Dict[str, object]) -> List[str]:
+        warnings = []
+        if not any(data.get(field_name) is not None for field_name in TABLE_REQUIRED_FIELDS[table_name]):
+            warnings.append(f"WARN: {table_name} 核心字段均为空")
+        return warnings
 
-    def validate_all_reports(self, all_reports: Dict[str, Dict]) -> Tuple[bool, Dict[str, List[str]]]:
-        """校验所有报表数据"""
-        all_errors = {}
-        is_all_valid = True
+    def _validate_consistency(self, table_name: str, data: Dict[str, object]) -> List[str]:
+        warnings = []
 
-        for report_type, data in all_reports.items():
-            is_valid, errors = self.validate_report(report_type, data)
-            if errors:
-                all_errors[report_type] = errors
-                is_all_valid = False
+        if table_name == "balance_sheet":
+            total_assets = data.get("asset_total_assets")
+            total_liabilities = data.get("liability_total_liabilities")
+            ratio = data.get("asset_liability_ratio")
+            if total_assets is not None and total_assets <= 0:
+                warnings.append("ERROR: 资产负债表总资产必须大于 0")
+            if total_assets and total_liabilities is not None and ratio is not None:
+                calc_ratio = round(total_liabilities / total_assets * 100, 4)
+                if abs(calc_ratio - ratio) > 0.5:
+                    warnings.append("WARN: 资产负债率与总资产/总负债不一致")
 
-        return is_all_valid, all_errors
+        if table_name == "cash_flow":
+            net_cash_flow = data.get("net_cash_flow")
+            operating_cf = data.get("operating_cf_net_amount")
+            operating_ratio = data.get("operating_cf_ratio_of_net_cf")
+            if net_cash_flow and operating_cf is not None and operating_ratio is not None:
+                calc_ratio = round((operating_cf * 10000) / net_cash_flow * 100, 4)
+                if abs(calc_ratio - operating_ratio) > 0.5:
+                    warnings.append("WARN: 经营现金流占比与净现金流不一致")
 
-def validate_financial_data(all_reports: Dict[str, Dict]) -> Tuple[bool, Dict[str, List[str]]]:
-    """便捷调用函数"""
+        if table_name == "core_performance":
+            revenue = data.get("total_operating_revenue")
+            gross_margin = data.get("gross_profit_margin")
+            if revenue is not None and revenue <= 0:
+                warnings.append("WARN: 核心业绩表营业总收入为空或非正数")
+            if gross_margin is not None and not (-100 <= gross_margin <= 100):
+                warnings.append("WARN: 销售毛利率超出合理区间")
+
+        return warnings
+
+    def validate_report(self, table_name: str, data: Dict[str, object]) -> Tuple[bool, List[str]]:
+        issues: List[str] = []
+        issues.extend(self._validate_common_fields(table_name, data))
+        issues.extend(self._validate_payload(table_name, data))
+        issues.extend(self._validate_required_metrics(table_name, data))
+        issues.extend(self._validate_consistency(table_name, data))
+        is_valid = not any(message.startswith("ERROR:") for message in issues)
+        return is_valid, issues
+
+    def validate_all_reports(self, reports: Dict[str, Dict[str, object]]) -> Tuple[bool, Dict[str, List[str]]]:
+        all_issues: Dict[str, List[str]] = {}
+        overall_valid = True
+
+        for table_name, data in reports.items():
+            is_valid, issues = self.validate_report(table_name, data)
+            if issues:
+                all_issues[table_name] = issues
+            overall_valid = overall_valid and is_valid
+
+        return overall_valid, all_issues
+
+
+def validate_financial_data(reports: Dict[str, Dict[str, object]]) -> Tuple[bool, Dict[str, List[str]]]:
     validator = FinancialDataValidator()
-    return validator.validate_all_reports(all_reports)
-
-if __name__ == "__main__":
-    # 测试校验
-    test_data = {
-        "core_performance": {
-            "company_code": "600080",
-            "company_name": "金花股份",
-            "report_year": "2023",
-            "total_revenue": 0.0,
-            "net_profit": 100000.0
-        }
-    }
-    validator = FinancialDataValidator()
-    is_valid, errors = validator.validate_all_reports(test_data)
-    print("校验结果：", is_valid, errors)
+    return validator.validate_all_reports(reports)

@@ -1,50 +1,130 @@
-# 财报目录配置
-REPORT_PATHS = [
-    r"D:\Bigdata\dbplat\data\data\附件2：财务报告\reports-上交所",
-    r"D:\Bigdata\dbplat\data\data\附件2：财务报告\reports-深交所"
-]
+from __future__ import annotations
 
-# 数据库配置（SQLite 优先，无需额外服务）
-DB_CONFIG = {
-    "type": "sqlite",
-    "path": r"D:\Bigdata\dbplat\finance_database.db",
-    "mysql": {
-        "host": "localhost",
-        "port": 3306,
-        "user": "root",
-        "password": "Liurui8196",
-        "database": "finance_db"
+from functools import lru_cache
+from pathlib import Path
+from typing import Dict, List
+
+from openpyxl import load_workbook
+
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = BASE_DIR / "data" / "data"
+DB_PATH = BASE_DIR / "finance_database.db"
+SCHEMA_PATH = BASE_DIR / "database" / "schema.sql"
+
+
+def _first_match(pattern: str) -> Path:
+    matches = sorted(DATA_DIR.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"未找到匹配文件: {pattern}")
+    return matches[0]
+
+
+ATTACHMENT_1_PATH = _first_match("附件1：中药上市公司基本信息*.xlsx")
+ATTACHMENT_3_PATH = _first_match("附件3：数据库-表名及字段说明*.xlsx")
+REPORT_ROOT = _first_match("附件2*")
+REPORT_PATHS = tuple(sorted(path for path in REPORT_ROOT.iterdir() if path.is_dir()))
+
+
+SHEET_TO_TABLE = {
+    "核心业绩指标表": "core_performance",
+    "资产负债表": "balance_sheet",
+    "现金流量表": "cash_flow",
+    "利润表": "income_statement",
+}
+
+TABLE_ALIASES = {
+    "core_performance": "core_performance_indicators_sheet",
+    "balance_sheet": "balance_sheet",
+    "cash_flow": "cash_flow_sheet",
+    "income_statement": "income_sheet",
+}
+
+PERIOD_KEYWORDS = {
+    "Q1": ("第一季度报告", "一季度报告"),
+    "HY": ("半年度报告",),
+    "Q3": ("第三季度报告", "三季度报告"),
+    "FY": ("年度报告", "年报"),
+}
+
+PERIOD_ORDER = {
+    "Q1": 1,
+    "HY": 2,
+    "Q3": 3,
+    "FY": 4,
+}
+
+COMMON_COLUMNS = ["stock_code", "stock_abbr", "report_period", "report_year"]
+
+FIELD_PRECISION = {
+    "eps": 4,
+    "net_asset_per_share": 4,
+    "operating_cf_per_share": 4,
+    "roe": 4,
+    "roe_weighted_excl_non_recurring": 4,
+    "operating_revenue_yoy_growth": 4,
+    "operating_revenue_qoq_growth": 4,
+    "net_profit_yoy_growth": 4,
+    "net_profit_qoq_growth": 4,
+    "net_profit_excl_non_recurring_yoy": 4,
+    "gross_profit_margin": 4,
+    "net_profit_margin": 4,
+    "asset_total_assets_yoy_growth": 4,
+    "liability_total_liabilities_yoy_growth": 4,
+    "asset_liability_ratio": 4,
+    "net_cash_flow_yoy_growth": 4,
+    "operating_cf_ratio_of_net_cf": 4,
+    "investing_cf_ratio_of_net_cf": 4,
+    "financing_cf_ratio_of_net_cf": 4,
+}
+
+
+@lru_cache(maxsize=1)
+def load_company_master() -> Dict[str, Dict[str, str]]:
+    workbook = load_workbook(ATTACHMENT_1_PATH, read_only=True, data_only=True)
+    worksheet = workbook[workbook.sheetnames[0]]
+
+    by_code: Dict[str, Dict[str, str]] = {}
+    by_abbr: Dict[str, Dict[str, str]] = {}
+    by_name: Dict[str, Dict[str, str]] = {}
+
+    for row in worksheet.iter_rows(min_row=2, values_only=True):
+        if not row or row[1] is None:
+            continue
+        stock_code = str(row[1]).strip().split(".")[0].zfill(6)
+        stock_abbr = (row[2] or "").strip()
+        company_name = (row[3] or "").strip()
+        record = {
+            "stock_code": stock_code,
+            "stock_abbr": stock_abbr,
+            "company_name": company_name,
+            "exchange": (row[6] or "").strip(),
+        }
+        by_code[stock_code] = record
+        if stock_abbr:
+            by_abbr[stock_abbr] = record
+        if company_name:
+            by_name[company_name] = record
+
+    return {
+        "by_code": by_code,
+        "by_abbr": by_abbr,
+        "by_name": by_name,
     }
-}
 
-# 附件3 字段映射（核心四张表）
-FIELD_MAPPING = {
-    "core_performance": [
-        "company_code", "company_name", "report_year",
-        "total_revenue", "net_profit", "net_profit_deduct",
-        "eps", "operating_cash_flow"
-    ],
-    "balance_sheet": [
-        "company_code", "company_name", "report_year",
-        "total_assets", "total_liabilities", "total_equity",
-        "monetary_funds", "accounts_receivable", "inventory"
-    ],
-    "income_statement": [
-        "company_code", "company_name", "report_year",
-        "operating_revenue", "operating_cost", "operating_profit",
-        "total_profit", "net_profit_parent"
-    ],
-    "cash_flow": [
-        "company_code", "company_name", "report_year",
-        "operating_cash_flow", "investing_cash_flow",
-        "financing_cash_flow", "net_cash_flow"
-    ]
-}
 
-# PDF 解析关键词配置
-PDF_KEYWORDS = {
-    "core_performance": ["主要财务指标", "业绩摘要"],
-    "balance_sheet": ["合并资产负债表", "母公司资产负债表"],
-    "income_statement": ["合并利润表", "母公司利润表"],
-    "cash_flow": ["合并现金流量表", "母公司现金流量表"]
-}
+@lru_cache(maxsize=1)
+def load_table_columns() -> Dict[str, List[str]]:
+    workbook = load_workbook(ATTACHMENT_3_PATH, read_only=True, data_only=True)
+    table_columns: Dict[str, List[str]] = {}
+
+    for sheet_name, table_name in SHEET_TO_TABLE.items():
+        worksheet = workbook[sheet_name]
+        columns: List[str] = []
+        for row in worksheet.iter_rows(min_row=2, values_only=True):
+            field_name = row[0]
+            if field_name:
+                columns.append(str(field_name).strip())
+        table_columns[table_name] = columns
+
+    return table_columns
