@@ -1,27 +1,42 @@
-# 【核心配置】数据库、API Key、路径统一配置
+from __future__ import annotations
+
 import os
+from pathlib import Path
 
-# --- 基础路径 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_RAW_DIR = os.path.join(BASE_DIR, 'data', 'raw')
-DATA_OUTPUT_DIR = os.path.join(BASE_DIR, 'data', 'output')
-RESULT_IMG_DIR = os.path.join(DATA_OUTPUT_DIR, 'result')
-os.makedirs(RESULT_IMG_DIR, exist_ok=True)
 
-# --- 数据库配置 ---
-DB_CONFIG = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': 'Liurui8196',  # 请修改
-    'database': 'financial_db',
-    'port': 3306,
-    'charset': 'utf8mb4'
-}
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_ROOT = PROJECT_ROOT / "data" / "data"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+OUTPUT_DIR = PROCESSED_DIR / "output"
+RESULT_DIR = OUTPUT_DIR / "result"
+RESULT_IMG_DIR = RESULT_DIR
+KNOWLEDGE_CACHE_DIR = PROCESSED_DIR / "knowledge"
+LOG_DIR = PROJECT_ROOT / "logs"
+DB_PATH = PROJECT_ROOT / "finance_database.db"
 
-# --- 大模型配置 (任务二、三需要) ---
-# 建议使用国内大模型API (如智谱、通义千问) 或 本地部署模型
-LLM_API_KEY = "YOUR_API_KEY"
-LLM_MODEL_NAME = "glm-4"  # 或其他模型
+for path in [PROCESSED_DIR, OUTPUT_DIR, RESULT_DIR, KNOWLEDGE_CACHE_DIR, LOG_DIR]:
+    path.mkdir(parents=True, exist_ok=True)
 
-# --- 向量数据库配置 (任务三需要) ---
-VECTOR_DB_PATH = os.path.join(BASE_DIR, 'data', 'processed', 'vector_db')
+
+def _first_match(pattern: str) -> Path:
+    matches = sorted(DATA_ROOT.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"未找到匹配文件: {pattern}")
+    return matches[0]
+
+
+ATTACHMENT_4_PATH = _first_match("附件4：问题汇总*.xlsx")
+ATTACHMENT_6_PATH = _first_match("附件6：问题汇总*.xlsx")
+ATTACHMENT_5_ROOT = _first_match("附件5*")
+STOCK_RESEARCH_DIR = ATTACHMENT_5_ROOT / "个股研报"
+INDUSTRY_RESEARCH_DIR = ATTACHMENT_5_ROOT / "行业研报"
+STOCK_RESEARCH_INFO_PATH = sorted(STOCK_RESEARCH_DIR.parent.glob("个股_研报信息*.xlsx"))[0]
+INDUSTRY_RESEARCH_INFO_PATH = sorted(INDUSTRY_RESEARCH_DIR.parent.glob("行业_研报信息*.xlsx"))[0]
+RESULT_2_PATH = OUTPUT_DIR / "result_2.xlsx"
+RESULT_3_PATH = OUTPUT_DIR / "result_3.xlsx"
+KNOWLEDGE_INDEX_PATH = KNOWLEDGE_CACHE_DIR / "knowledge_index.json"
+
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+USE_REMOTE_LLM = bool(OPENAI_API_KEY)

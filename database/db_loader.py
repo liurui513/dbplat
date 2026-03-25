@@ -213,5 +213,40 @@ def main() -> None:
         loader.close()
 
 
+def init_db(db_path: str | Path = DB_PATH, reset_database: bool = True) -> Path:
+    loader = FinancialDBLoader(db_path=db_path, reset_database=reset_database)
+    try:
+        return loader.db_path
+    finally:
+        loader.close()
+
+
+def process_and_load(
+    pdf_path: str | Path,
+    db_path: str | Path = DB_PATH,
+    reset_database: bool = False,
+) -> bool:
+    loader = FinancialDBLoader(db_path=db_path, reset_database=reset_database)
+    try:
+        success = loader.process_pdf_file(pdf_path)
+        loader.update_quarter_over_quarter_growth()
+        loader.conn.commit()
+        return success
+    finally:
+        loader.close()
+
+
+def build_database(
+    db_path: str | Path = DB_PATH,
+    report_paths: Iterable[Path] = REPORT_PATHS,
+    reset_database: bool = True,
+) -> Dict[str, int]:
+    loader = FinancialDBLoader(db_path=db_path, reset_database=reset_database)
+    try:
+        return loader.batch_process_pdfs(report_paths=report_paths)
+    finally:
+        loader.close()
+
+
 if __name__ == "__main__":
     main()

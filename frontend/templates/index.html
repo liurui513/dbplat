@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>财报智能问数助手</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="page">
+    <aside class="sidebar">
+      <div class="brand">
+        <p class="eyebrow">Browser Frontend</p>
+        <h1>财报智能问数助手</h1>
+        <p>把任务二、任务三已经实现好的数据库查询与研报问答，升级成浏览器可用界面。</p>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>运行概览</h2>
+          <button id="refreshBtn" class="ghost-btn">刷新</button>
+        </div>
+        <div id="overview" class="overview-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>快捷操作</h2>
+        </div>
+        <div class="action-stack">
+          <button id="resetSessionBtn" class="ghost-btn">清空会话</button>
+          <button id="rebuildDbBtn" class="primary-btn">重建数据库</button>
+          <button id="rebuildKnowledgeBtn" class="ghost-btn">重建知识库</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>示例问题</h2>
+        </div>
+        <div id="examples" class="example-list"></div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Web Mode</p>
+          <h2>自然语言输入，直接得到 SQL、图表与答案</h2>
+          <p>支持财务指标查询、趋势分析、Top 排名、原因分析，以及研报知识问答。</p>
+        </div>
+        <div class="status-pill">
+          <span class="status-dot"></span>
+          <span id="healthText">正在检查服务状态</span>
+        </div>
+      </section>
+
+      <section id="timeline" class="timeline">
+        <article class="message assistant">
+          <div class="role">助手</div>
+          <div class="bubble">
+            <p>可以直接提问，例如：</p>
+            <p>“华润三九近三年的主营业务收入情况做可视化绘图”</p>
+            <p>“2024年利润最高的top10企业有哪些？”</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="composer">
+        <form id="chatForm">
+          <textarea id="messageInput" rows="3" placeholder="输入公司名、指标、年份或研报问题"></textarea>
+          <div class="composer-foot">
+            <span id="statusText" class="status-text">就绪</span>
+            <button type="submit" class="primary-btn">发送问题</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <template id="messageTemplate">
+    <article class="message">
+      <div class="role"></div>
+      <div class="bubble"></div>
+    </article>
+  </template>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

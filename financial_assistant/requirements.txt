@@ -1,1 +1,7 @@
-# 依赖包列表
+pdfplumber
+openpyxl
+pandas
+sqlalchemy
+matplotlib
+langchain-openai
+flask
