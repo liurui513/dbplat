@@ -43,7 +43,7 @@ def main() -> None:
     elif args.mode == "task2":
         print(run_task2(reset_database=args.reset_database))
     elif args.mode == "task3":
-        print(run_task3(reset_database=args.reset_database, rebuild_knowledge=True))
+        print(run_task3(reset_database=args.reset_database, rebuild_knowledge=args.rebuild_knowledge))
     elif args.mode == "knowledge":
         build_knowledge(force_rebuild=args.rebuild_knowledge)
         print("knowledge_index_built")
@@ -61,7 +61,7 @@ def main() -> None:
         )
     elif args.mode == "all":
         task2_path = run_task2(reset_database=args.reset_database)
-        task3_path = run_task3(reset_database=False, rebuild_knowledge=True)
+        task3_path = run_task3(reset_database=False, rebuild_knowledge=args.rebuild_knowledge)
         print(task2_path)
         print(task3_path)
 

@@ -21,25 +21,51 @@ from .config import (
     RESULT_DIR,
 )
 
+REQUIRED_DB_TABLES = (
+    "core_performance",
+    "balance_sheet",
+    "income_statement",
+    "cash_flow",
+)
+
 
 def create_db_engine(db_path: str | Path = DB_PATH):
     return create_engine(f"sqlite:///{Path(db_path)}", future=True)
+
+
+def _database_has_required_tables(conn: sqlite3.Connection) -> bool:
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    except sqlite3.DatabaseError:
+        return False
+
+    table_names = {str(row[0]) for row in rows if row and row[0]}
+    if any(table_name not in table_names for table_name in REQUIRED_DB_TABLES):
+        return False
+
+    for table_name in REQUIRED_DB_TABLES:
+        try:
+            row_count = int(conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
+        except sqlite3.DatabaseError:
+            return False
+        if row_count == 0:
+            return False
+
+    return True
 
 
 def ensure_database(reset_database: bool = False) -> Path:
     db_path = Path(DB_PATH)
     needs_rebuild = reset_database or not db_path.exists()
     if not needs_rebuild and db_path.exists():
-        conn = sqlite3.connect(db_path)
         try:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='core_performance'"
-            ).fetchone()
-            table_exists = bool(row and row[0])
-            row_count = conn.execute("SELECT COUNT(*) FROM core_performance").fetchone()[0] if table_exists else 0
-            needs_rebuild = not table_exists or row_count == 0
-        finally:
-            conn.close()
+            conn = sqlite3.connect(db_path)
+            try:
+                needs_rebuild = not _database_has_required_tables(conn)
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError:
+            needs_rebuild = True
     if needs_rebuild:
         build_database(db_path=db_path, reset_database=True)
     return db_path

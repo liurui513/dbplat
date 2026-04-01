@@ -1,4 +1,5 @@
 pdfplumber
+pymupdf
 openpyxl
 pandas
 sqlalchemy

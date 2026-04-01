@@ -8,6 +8,7 @@ from typing import Any
 import pdfplumber
 from openpyxl import load_workbook
 
+from database.ocr_backend import get_ocr_backend, get_ocr_settings
 from financial_assistant.config import (
     INDUSTRY_RESEARCH_DIR,
     INDUSTRY_RESEARCH_INFO_PATH,
@@ -85,6 +86,24 @@ def _relative_source_path(path: Path) -> str:
     return "./" + path.relative_to(data_root).as_posix()
 
 
+def _page_text_with_fallback(pdf_path: Path, pdf: pdfplumber.PDF, page_index: int) -> str:
+    page = pdf.pages[page_index]
+    text = (page.extract_text() or "").strip()
+    ocr_backend = get_ocr_backend()
+    ocr_settings = get_ocr_settings()
+    if ocr_backend is None:
+        return text
+
+    if ocr_settings.fallback_only and len(text) >= ocr_settings.min_text_length:
+        return text
+
+    try:
+        ocr_result = ocr_backend.extract_page(pdf_path, page_index)
+    except Exception:
+        return text
+    return (ocr_result.text or text).strip()
+
+
 def _build_documents(root: Path, source_type: str, metadata_by_title: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     documents: list[dict[str, Any]] = []
     for pdf_path in _deduped_pdfs(root):
@@ -92,7 +111,7 @@ def _build_documents(root: Path, source_type: str, metadata_by_title: dict[str, 
         metadata = metadata_by_title.get(title, {})
         with pdfplumber.open(str(pdf_path)) as pdf:
             for page_number, page in enumerate(pdf.pages, start=1):
-                page_text = (page.extract_text() or "").strip()
+                page_text = _page_text_with_fallback(pdf_path, pdf, page_number - 1)
                 if not page_text:
                     continue
                 chart_caption = _extract_chart_caption(page_text)

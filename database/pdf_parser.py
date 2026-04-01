@@ -9,8 +9,10 @@ import pdfplumber
 
 try:
     from .config import FIELD_PRECISION, PERIOD_KEYWORDS, load_company_master
+    from .ocr_backend import OCRPageResult, get_ocr_backend, get_ocr_settings
 except ImportError:  # pragma: no cover
     from database.config import FIELD_PRECISION, PERIOD_KEYWORDS, load_company_master
+    from database.ocr_backend import OCRPageResult, get_ocr_backend, get_ocr_settings
 
 
 logging.basicConfig(level=logging.INFO)
@@ -227,13 +229,40 @@ class FinancialReportParser:
     def __init__(self, pdf_path: str | Path):
         self.pdf_path = Path(pdf_path)
         self.company_master = load_company_master()
+        self.ocr_backend = get_ocr_backend()
+        self.ocr_settings = get_ocr_settings()
+        self._ocr_cache: Dict[int, OCRPageResult] = {}
+
+    def _ocr_page_result(self, page_index: int) -> OCRPageResult | None:
+        if self.ocr_backend is None:
+            return None
+        if page_index not in self._ocr_cache:
+            try:
+                self._ocr_cache[page_index] = self.ocr_backend.extract_page(self.pdf_path, page_index)
+            except Exception as exc:  # pragma: no cover - runtime diagnostics
+                logger.warning("OCR fallback failed for %s page %s: %s", self.pdf_path.name, page_index + 1, exc)
+                self._ocr_cache[page_index] = OCRPageResult(text="", tables=[])
+        return self._ocr_cache[page_index]
+
+    def _page_text(self, pdf: pdfplumber.PDF, page_index: int) -> str:
+        page = pdf.pages[page_index]
+        text = (page.extract_text() or "").strip()
+        if self.ocr_backend is None:
+            return text
+
+        if self.ocr_settings.fallback_only and len(text) >= self.ocr_settings.min_text_length:
+            return text
+
+        ocr_result = self._ocr_page_result(page_index)
+        ocr_text = (ocr_result.text if ocr_result else "").strip()
+        return ocr_text or text
 
     def _extract_text(self, pdf: pdfplumber.PDF, pages: Optional[int] = None) -> str:
-        page_iterable = pdf.pages[:pages] if pages else pdf.pages
-        return "\n".join(page.extract_text() or "" for page in page_iterable)
+        page_count = pages if pages is not None else len(pdf.pages)
+        return "\n".join(self._page_text(pdf, page_index) for page_index in range(page_count))
 
     def _parse_metadata(self, pdf: pdfplumber.PDF) -> Dict[str, object]:
-        first_page_text = pdf.pages[0].extract_text() or ""
+        first_page_text = self._page_text(pdf, 0)
         first_pages_text = self._extract_text(pdf, pages=min(5, len(pdf.pages)))
         filename = self.pdf_path.name
         metadata = {
@@ -287,11 +316,12 @@ class FinancialReportParser:
 
         return metadata
 
-    def _extract_tables(self, page: pdfplumber.page.Page) -> list[list[list[Optional[str]]]]:
+    def _extract_tables(self, pdf: pdfplumber.PDF, page_index: int) -> list[list[list[Optional[str]]]]:
+        page = pdf.pages[page_index]
         tables = page.extract_tables() or []
         if tables:
             return tables
-        return page.extract_tables(
+        tables = page.extract_tables(
             table_settings={
                 "vertical_strategy": "text",
                 "horizontal_strategy": "text",
@@ -299,6 +329,13 @@ class FinancialReportParser:
                 "join_tolerance": 3,
             }
         ) or []
+        if tables:
+            return tables
+
+        ocr_result = self._ocr_page_result(page_index)
+        if ocr_result and ocr_result.tables:
+            return ocr_result.tables
+        return []
 
     def _normalize_cell(self, cell: Optional[str]) -> str:
         return "" if cell is None else str(cell).replace("\n", "").strip()
@@ -382,8 +419,8 @@ class FinancialReportParser:
         previous_values = {section: {} for section in STATEMENT_ALIASES}
         current_section: Optional[str] = None
 
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
+        for page_index, _ in enumerate(pdf.pages):
+            page_text = self._page_text(pdf, page_index)
 
             for section, marker in STATEMENT_START_MARKERS.items():
                 if marker in page_text:
@@ -391,7 +428,7 @@ class FinancialReportParser:
                     break
 
             if current_section:
-                for table in self._extract_tables(page):
+                for table in self._extract_tables(pdf, page_index):
                     for label, current, previous in self._iter_table_rows(table):
                         field_name = STATEMENT_ALIAS_INDEX[current_section].get(normalize_label(label))
                         if not field_name or field_name in current_values[current_section]:
@@ -410,8 +447,8 @@ class FinancialReportParser:
         current_values: Dict[str, Dict[str, Optional[float]]],
         previous_values: Dict[str, Dict[str, Optional[float]]],
     ) -> None:
-        for page in pdf.pages:
-            for table in self._extract_tables(page):
+        for page_index, _ in enumerate(pdf.pages):
+            for table in self._extract_tables(pdf, page_index):
                 for label, current, previous in self._iter_table_rows(table):
                     normalized_label = normalize_label(label)
                     for section, alias_index in STATEMENT_ALIAS_INDEX.items():
@@ -496,8 +533,8 @@ class FinancialReportParser:
         current_metrics: Dict[str, Optional[float]] = {}
         growth_metrics: Dict[str, Optional[float]] = {}
 
-        for page in pdf.pages[: min(10, len(pdf.pages))]:
-            for table in self._extract_tables(page):
+        for page_index in range(min(10, len(pdf.pages))):
+            for table in self._extract_tables(pdf, page_index):
                 for label, _, numeric_tokens in self._iter_compound_rows(table):
                     field_name = CORE_ALIAS_INDEX.get(normalize_label(label))
                     if not field_name or field_name in current_metrics:

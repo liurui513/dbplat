@@ -1,0 +1,47 @@
+financial_assistant/                # 项目根目录
+├── config.py                       # 【核心配置】数据库、API Key、路径统一配置
+├── requirements.txt                # 依赖包列表
+├── main.py                         # 【总入口】一键运行全流程或启动Web服务
+│
+├── data/                           # 【数据目录】
+│   ├── raw/                        # 原始数据 (存放附件1,2,5)
+│   │   ├── basic_info.xlsx
+│   │   ├── reports_sse/            # 上交所财报
+│   │   ├── reports_szse/           # 深交所财报
+│   │   └── research_reports/       # 研报数据
+│   ├── processed/                  # 中间处理数据 (CSV临时文件等)
+│   └── output/                     # 最终产出
+│       ├── result/                 # 可视化图表 (B002_1.jpg等)
+│       ├── result_2.xlsx           # 任务二结果
+│       └── result_3.xlsx           # 任务三结果
+│
+├── database/                       # 【任务一：数据库构建】
+│   ├── schema.sql                  # 建表语句 (4张核心表)
+│   ├── pdf_parser.py               # PDF解析核心逻辑 (提取四大表数据)
+│   ├── data_validator.py           # 数据校验逻辑 (一致性检查)
+│   └── db_loader.py                # 数据入库脚本
+│
+├── engine/                         # 【任务二：智能问答引擎】
+│   ├── intent_recognizer.py        # 意图识别 (单轮/多轮/模糊澄清)
+│   ├── sql_generator.py            # Text-to-SQL 生成器
+│   ├── query_executor.py           # SQL执行与结果获取
+│   ├── visualizer.py               # 自动绘图 (折线/柱状/饼图)
+│   └── dialogue_manager.py         # 多轮对话状态管理
+│
+├── knowledge/                      # 【任务三：增强可靠性】
+│   ├── kb_builder.py               # 知识库构建 (研报向量化)
+│   ├── multi_intent_planner.py     # 多意图拆解与规划
+│   ├── answer_validator.py         # 答案校验与归因分析
+│   └── rag_retriever.py            # 检索增强生成 (RAG) 检索器
+│
+├── frontend/                       # 【前端交互】
+│   ├── app.py                      # Streamlit 主界面
+│   └── utils.py                    # 前端辅助函数
+│
+├── tests/                          # 【测试与验证】
+│   ├── test_parser.py              # 解析测试
+│   ├── test_engine.py              # 引擎测试
+│   └── test_integration.py         # 集成测试 (跑通附件4/6问题)
+│
+└── logs/                           # 日志目录
+    └── run.log

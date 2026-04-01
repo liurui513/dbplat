@@ -17,6 +17,44 @@ def _series_period_label(row: pd.Series) -> str:
     return format_period_label(int(row["report_year"]), str(row["report_period"]))
 
 
+def _time_scope_label(parsed: dict[str, Any]) -> str:
+    year_range = parsed.get("year_range")
+    if year_range:
+        start_year, end_year = year_range
+        if start_year == end_year:
+            return f"{start_year}年"
+        return f"{start_year}-{end_year}年"
+    mapping = {
+        "recent_one_year": "近一年",
+        "recent_two_years": "近两年",
+        "recent_three_years": "近三年",
+        "recent_four_years": "近四年",
+        "recent_five_years": "近五年",
+        "all_available_periods": "历年",
+    }
+    return mapping.get(parsed.get("time_scope"), "该时间区间")
+
+
+def _metric_focus(metric: dict[str, Any]) -> str:
+    mapping = {
+        "total_operating_revenue": "主营业务规模",
+        "net_profit": "盈利水平",
+        "total_profit": "利润总额水平",
+    }
+    return mapping.get(str(metric.get("key")), metric_display_name(metric))
+
+
+def _change_summary(start_value: float, end_value: float) -> str:
+    delta = end_value - start_value
+    if abs(delta) < 1e-9:
+        return "整体基本持平"
+    direction = "增长" if delta > 0 else "下降"
+    if abs(start_value) < 1e-9:
+        return f"{direction}{abs(delta):,.2f}"
+    pct = abs(delta) / abs(start_value) * 100
+    return f"{direction}{abs(delta):,.2f}，变动幅度{pct:.2f}%"
+
+
 def format_scalar_answer(parsed: dict[str, Any], dataframe: pd.DataFrame) -> str:
     metric = parsed["metric"]
     company = parsed["company"]
@@ -51,6 +89,9 @@ def format_trend_answer(parsed: dict[str, Any], dataframe: pd.DataFrame) -> str:
     end_row = working_df.iloc[-1]
     max_row = working_df.loc[values.idxmax()]
     min_row = working_df.loc[values.idxmin()]
+    time_scope_label = _time_scope_label(parsed)
+    metric_focus = _metric_focus(metric)
+    question = str(parsed.get("raw_question", ""))
 
     if values.min() < 0 < values.max():
         trend_desc = "先下探后修复，呈明显的 V 型反转"
@@ -61,13 +102,103 @@ def format_trend_answer(parsed: dict[str, Any], dataframe: pd.DataFrame) -> str:
     else:
         trend_desc = "整体波动相对平稳"
 
-    return (
-        f"{company['stock_abbr']}的{metric_display_name(metric)}{trend_desc}。"
-        f"区间起点为{_series_period_label(start_row)}，数值为{format_number(float(start_row['value']), metric['unit'])}；"
-        f"最近一期为{_series_period_label(end_row)}，数值为{format_number(float(end_row['value']), metric['unit'])}。"
-        f"区间高点出现在{_series_period_label(max_row)}，低点出现在{_series_period_label(min_row)}。"
-        f"{note}"
+    start_value = float(start_row["value"])
+    end_value = float(end_row["value"])
+    change_summary = _change_summary(start_value, end_value)
+
+    if len(working_df) == 1:
+        content = (
+            f"{company['stock_abbr']}{time_scope_label}可比的{metric_display_name(metric)}数据共有1期，"
+            f"为{_series_period_label(end_row)}的{format_number(end_value, metric['unit'])}，"
+            f"主要反映{metric_focus}在最新可比年度的水平。"
+        )
+    elif len(working_df) <= 2:
+        content = (
+            f"{company['stock_abbr']}{time_scope_label}的{metric_display_name(metric)}主要反映{metric_focus}。"
+            f"从{_series_period_label(start_row)}的{format_number(start_value, metric['unit'])}"
+            f"变动到{_series_period_label(end_row)}的{format_number(end_value, metric['unit'])}，{change_summary}。"
+            f"其中高点为{_series_period_label(max_row)}，低点为{_series_period_label(min_row)}。"
+        )
+    else:
+        content = (
+            f"{company['stock_abbr']}{time_scope_label}的{metric_display_name(metric)}{trend_desc}，"
+            f"主要反映{metric_focus}的变化。"
+            f"区间起点为{_series_period_label(start_row)}，数值为{format_number(start_value, metric['unit'])}；"
+            f"最近一期为{_series_period_label(end_row)}，数值为{format_number(end_value, metric['unit'])}。"
+            f"区间高点出现在{_series_period_label(max_row)}，低点出现在{_series_period_label(min_row)}。"
+        )
+
+    if any(keyword in question for keyword in ["可视化", "绘图", "折线图", "柱状图"]):
+        content += " 结果已按该问题要求整理为可视化分析口径。"
+
+    return content + note
+
+
+def format_comparison_answer(parsed: dict[str, Any], dataframe: pd.DataFrame) -> str:
+    metric = parsed["metric"]
+    company = parsed["company"]
+    compare_mode = parsed.get("compare_mode")
+    question = str(parsed.get("raw_question", ""))
+
+    if dataframe.empty:
+        return f"未查询到{company['stock_abbr']}的{metric_display_name(metric)}比较数据。"
+
+    if compare_mode == "qoq":
+        row = dataframe.iloc[0]
+        value = row.get("value")
+        growth = row.get("growth")
+        if value is None:
+            return f"未查询到{company['stock_abbr']}{metric_display_name(metric)}的环比数据。"
+        period_label = format_period_label(int(row["report_year"]), str(row["report_period"]))
+        if pd.isna(growth):
+            return (
+                f"{company['stock_abbr']}{period_label}的{metric_display_name(metric)}为"
+                f"{format_number(float(value), metric['unit'])}，但当前数据不足以计算环比结果。"
+            )
+        growth_value = float(growth)
+        direction = "增长" if growth_value >= 0 else "下降"
+        content = (
+            f"{company['stock_abbr']}{period_label}的{metric_display_name(metric)}为"
+            f"{format_number(float(value), metric['unit'])}，按环比口径较上期{direction}{abs(growth_value):.2f}%。"
+        )
+        if any(keyword in question for keyword in ["可视化", "绘图", "折线图", "柱状图"]):
+            content += " 已按比较口径生成可视化结果。"
+        return content
+
+    working_df = dataframe.sort_values(["report_year", "report_period"]).reset_index(drop=True)
+    if len(working_df) == 1:
+        row = working_df.iloc[0]
+        period_label = format_period_label(int(row["report_year"]), str(row["report_period"]))
+        return (
+            f"{company['stock_abbr']}{period_label}的{metric_display_name(metric)}为"
+            f"{format_number(float(row['value']), metric['unit'])}，但缺少可比期间数据，暂时无法完成比较。"
+        )
+
+    older = working_df.iloc[0]
+    newer = working_df.iloc[-1]
+    older_value = float(older["value"])
+    newer_value = float(newer["value"])
+    delta = newer_value - older_value
+    pct = None if abs(older_value) < 1e-9 else delta / abs(older_value) * 100
+    direction = "增长" if delta >= 0 else "下降"
+    compare_word = "同比" if compare_mode == "yoy" else "对比来看"
+    period_hint = ""
+    if "今年" in question and "去年" in question:
+        period_hint = "按数据库最新可比期间口径，"
+
+    content = (
+        f"{period_hint}{company['stock_abbr']}{_series_period_label(newer)}的{metric_display_name(metric)}为"
+        f"{format_number(newer_value, metric['unit'])}，"
+        f"{_series_period_label(older)}为{format_number(older_value, metric['unit'])}。"
     )
+    if pct is None:
+        content += f"{compare_word}{direction}{abs(delta):,.2f}。"
+    else:
+        content += f"{compare_word}{direction}{abs(delta):,.2f}，变动幅度{abs(pct):.2f}%。"
+
+    if any(keyword in question for keyword in ["可视化", "绘图", "折线图", "柱状图"]):
+        content += " 已按比较口径生成可视化结果。"
+    return content
 
 
 def format_ranking_answer(report_year: int, dataframe: pd.DataFrame) -> str:

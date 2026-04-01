@@ -86,7 +86,7 @@ def detect_metric(text: str) -> dict[str, Any] | None:
 
 
 def detect_period(text: str) -> tuple[int | None, str | None]:
-    year_match = re.search(r"(20\d{2})年", text)
+    year_match = re.search(r"(20\d{2})", text)
     report_year = int(year_match.group(1)) if year_match else None
 
     if any(token in text for token in ["第一季度", "一季度", "Q1", "1季度"]):
@@ -101,10 +101,46 @@ def detect_period(text: str) -> tuple[int | None, str | None]:
 
 
 def detect_time_scope(text: str) -> str | None:
+    if any(token in text for token in ["近一年", "最近一年", "近1年", "最近1年", "过去一年"]):
+        return "recent_one_year"
+    if any(token in text for token in ["近两年", "最近两年", "近2年", "最近2年", "过去两年"]):
+        return "recent_two_years"
     if any(token in text for token in ["近三年", "最近三年"]):
         return "recent_three_years"
+    if any(token in text for token in ["近四年", "最近四年", "近4年", "最近4年"]):
+        return "recent_four_years"
+    if any(token in text for token in ["近五年", "最近五年", "近5年", "最近5年"]):
+        return "recent_five_years"
     if any(token in text for token in ["近几年", "近年来", "近年", "历年"]):
         return "all_available_periods"
+    return None
+
+
+def detect_year_range(text: str) -> tuple[int, int] | None:
+    patterns = [
+        r"(20\d{2})\s*年?\s*[-~—–]\s*(20\d{2})\s*年?",
+        r"(20\d{2})\s*年?\s*(?:到|至)\s*(20\d{2})\s*年?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        start_year = int(match.group(1))
+        end_year = int(match.group(2))
+        if start_year > end_year:
+            start_year, end_year = end_year, start_year
+        return start_year, end_year
+    return None
+
+
+def detect_compare_mode(text: str) -> str | None:
+    lowered = text.lower()
+    if "环比" in text or "较上期" in text or "上一期" in text:
+        return "qoq"
+    if "同比" in text or "上年同期" in text or "去年同期" in text or ("今年" in text and "去年" in text):
+        return "yoy"
+    if any(keyword in text for keyword in ["对比", "比较", "相比"]) or "vs" in lowered:
+        return "compare"
     return None
 
 
@@ -123,13 +159,23 @@ def detect_ranking_limit(text: str) -> int:
 
 def classify_intent(text: str, metric: dict[str, Any] | None) -> str:
     lowered = text.lower()
+    year_range = detect_year_range(text)
+    compare_mode = detect_compare_mode(text)
     if "原因" in text or "归因" in text or "为什么" in text:
         return "cause_analysis"
-    if "医保目录" in text or ("产品有哪些" in text and "中药" in text):
+    has_medicare_topic = any(keyword in text for keyword in ["医保目录", "医保谈判", "医保准入"])
+    asks_products = ("产品有哪些" in text and "中药" in text) or ("新增" in text and "中药" in text)
+    asks_industry_impact = has_medicare_topic and any(
+        keyword in text
+        for keyword in ["影响", "医药行业", "行业", "行业风向", "创新导向", "支付", "商保"]
+    )
+    if "医保目录" in text or asks_products or asks_industry_impact:
         return "knowledge_query"
+    if compare_mode is not None:
+        return "comparison_analysis"
     if re.search(r"top\s*\d+", lowered) or "最高" in text or "排名" in text or re.search(r"前\s*\d+", text):
         return "ranking_analysis"
-    if any(keyword in text for keyword in ["趋势", "变化", "可视化", "绘图", "折线图", "柱状图"]) or detect_time_scope(text):
+    if any(keyword in text for keyword in ["趋势", "变化", "可视化", "绘图", "折线图", "柱状图"]) or detect_time_scope(text) or year_range:
         return "trend_analysis"
     if metric is not None:
         return "single_metric"
@@ -153,6 +199,10 @@ def merge_with_context(
             merged["report_period"] = context["report_period"]
         if merged.get("time_scope") is None and context.get("time_scope") is not None:
             merged["time_scope"] = context["time_scope"]
+        if merged.get("year_range") is None and context.get("year_range") is not None:
+            merged["year_range"] = context["year_range"]
+        if merged.get("compare_mode") is None and context.get("compare_mode") is not None:
+            merged["compare_mode"] = context["compare_mode"]
         if merged.get("ranking_limit") is None and context.get("ranking_limit") is not None:
             merged["ranking_limit"] = context["ranking_limit"]
 
@@ -177,6 +227,8 @@ def parse_user_input(
         "report_year": report_year,
         "report_period": report_period,
         "time_scope": detect_time_scope(user_input),
+        "year_range": detect_year_range(user_input),
+        "compare_mode": detect_compare_mode(user_input),
         "ranking_limit": detect_ranking_limit(user_input),
     }
     parsed["intent"] = classify_intent(user_input, metric)
@@ -199,4 +251,9 @@ def clarify_if_needed(parsed: dict[str, Any]) -> str | None:
         return "请先告诉我你想分析哪一家公司的业绩原因。"
     if intent == "ranking_analysis" and parsed.get("report_year") is None:
         return "请补充要排名的年份，例如 2024 年利润最高的企业。"
+    if intent == "comparison_analysis":
+        if parsed.get("company") is None:
+            return "请先告诉我你想比较哪一家公司。"
+        if parsed.get("metric") is None:
+            return "请补充要比较的财务指标，例如净利润或主营业务收入。"
     return None
